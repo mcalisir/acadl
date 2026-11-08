@@ -2,6 +2,7 @@
 scihub_dl.py - Akademik PDF Toplu Indirici (Scrapling)
 
 Sci-Hub'dan indirir; bulamazsa yayincinin sitesinden acik erisimli PDF'i alir.
+O da basarisizsa Unpaywall API ile acik erisim URL'si arar.
 
 Kullanim:
     python scihub_dl.py kaynaklar.txt                    # dosyadan DOI cikar ve indir
@@ -9,6 +10,7 @@ Kullanim:
     python scihub_dl.py kaynaklar.txt -o ./makaleler       # klasor belirt
     type kaynaklar.txt | python scihub_dl.py -             # stdin'den oku
     python scihub_dl.py kaynaklar.txt --no-scihub          # sadece yayinci
+    python scihub_dl.py kaynaklar.txt --email a@b.edu      # Unpaywall fallback aktif
 
 Gereksinimler:
     pip install "scrapling[fetchers]"
@@ -278,6 +280,90 @@ def download_from_publisher(doi: str, output_dir: Path, session, idx: int, total
         return False
 
 
+# --- Unpaywall API fallback -------------------------------------------------
+
+UNPAYWALL_API = "https://api.unpaywall.org/v2"
+
+def find_unpaywall_pdf(doi: str, session, email: str) -> str | None:
+    """Unpaywall API'den acik erisim PDF URL'si bulur."""
+    try:
+        url = f"{UNPAYWALL_API}/{doi}?email={email}"
+        resp = session.get(url)
+        if resp.status != 200:
+            return None
+        data = json.loads(resp.body.decode())
+        if not data.get("is_oa"):
+            return None
+        best = data.get("best_oa_location") or {}
+        pdf_url = best.get("url_for_pdf")
+        if pdf_url:
+            return pdf_url
+        for loc in data.get("oa_locations", []):
+            if loc.get("url_for_pdf"):
+                return loc["url_for_pdf"]
+        return None
+    except Exception:
+        return None
+
+
+def _follow_meta_refresh(body: bytes, base_url: str) -> str | None:
+    """HTML'deki meta http-equiv=refresh redirect URL'sini cikar."""
+    text = body[:4000].decode("utf-8", errors="replace")
+    m = re.search(
+        r'http-equiv=["\']refresh["\'][^>]*content=["\'][^;]*;\s*URL=[\'\"]?([^"\'>\s]+)',
+        text, re.I,
+    )
+    if not m:
+        return None
+    url = m.group(1)
+    if url.startswith("/"):
+        base = re.match(r'https?://[^/]+', base_url)
+        url = (base.group(0) if base else "") + url
+    return url
+
+
+def download_from_unpaywall(doi: str, output_dir: Path, session, email: str,
+                             idx: int, total: int) -> bool:
+    """Unpaywall API uzerinden acik erisimli PDF indir."""
+    filename = safe_filename(doi)
+    filepath = output_dir / filename
+
+    print(f"           >> Unpaywall API deneniyor...")
+    pdf_url = find_unpaywall_pdf(doi, session, email)
+    if not pdf_url:
+        print(f"           X  Unpaywall'da acik erisim PDF bulunamadi")
+        return False
+
+    print(f"           PDF: {pdf_url[:90]}...")
+    try:
+        resp = session.get(pdf_url)
+        raw = resp.body
+
+        # Meta-refresh redirect varsa takip et
+        if not raw[:5].startswith(b"%PDF") and b"http-equiv" in raw[:4000]:
+            redirect = _follow_meta_refresh(raw, pdf_url)
+            if redirect:
+                print(f"           >> Meta-refresh redirect takip ediliyor...")
+                resp = session.get(redirect)
+                raw = resp.body
+
+        if len(raw) < 1000:
+            print(f"           !  Dosya cok kucuk ({len(raw)} B)")
+            return False
+
+        if not raw[:5].startswith(b"%PDF"):
+            print(f"           !  Gecerli PDF degil (bot koruması olabilir)")
+            return False
+
+        filepath.write_bytes(raw)
+        kb = len(raw) / 1024
+        print(f"           OK {filename}  ({kb:.0f} KB) [unpaywall]")
+        return True
+    except Exception as e:
+        print(f"           !  Unpaywall indirme hatasi: {e}")
+        return False
+
+
 # --- Indirme motoru ---------------------------------------------------------
 
 def download_one(doi: str, output_dir: Path, session, idx: int, total: int,
@@ -410,6 +496,8 @@ Ornekler:
                         help="Sadece DOI'leri listele, indirme")
     parser.add_argument("--no-scihub", action="store_true",
                         help="Sci-Hub'u atla, sadece yayinci sitesinden indir")
+    parser.add_argument("--email", "-e", default=None,
+                        help="Unpaywall API icin e-posta (verilirse 3. fallback aktif)")
 
     args = parser.parse_args()
 
@@ -465,6 +553,10 @@ Ornekler:
     else:
         print(f"  Mirror : {base}")
         print(f"  Fallback: Yayinci sitesi (acik erisim)")
+    if args.email:
+        print(f"  Unpaywall: AKTIF ({args.email})")
+    else:
+        print(f"  Unpaywall: kapali (--email ile aktiflesir)")
     print(f"  DOI    : {len(dois)} adet")
     print(f"  Klasor : {output_dir.resolve()}")
     print(f"  Bekleme: {args.delay}s")
@@ -489,6 +581,9 @@ Ornekler:
                 if not success:
                     success = download_from_publisher(
                         doi, output_dir, session, i, len(dois))
+            if not success and args.email:
+                success = download_from_unpaywall(
+                    doi, output_dir, session, args.email, i, len(dois))
             if success:
                 ok += 1
             else:
@@ -506,6 +601,8 @@ Ornekler:
         print(f"  Basarisiz: {len(fail)}")
         for d in fail:
             print(f"     - {d}")
+        if not args.email:
+            print(f"\n  IPUCU: --email ile Unpaywall fallback aktiflesir")
     print(f"  Klasor   : {output_dir.resolve()}")
     print(sep)
 
