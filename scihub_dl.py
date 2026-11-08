@@ -2,7 +2,8 @@
 scihub_dl.py - Akademik PDF Toplu Indirici (Scrapling)
 
 Sci-Hub'dan indirir; bulamazsa yayincinin sitesinden acik erisimli PDF'i alir.
-O da basarisizsa Unpaywall API ile acik erisim URL'si arar.
+O da basarisizsa Unpaywall API ile acik erisim URL'si arar. En son
+stealth browser ile bot korumali siteleri (MDPI/SAGE/Elsevier) dener.
 
 Kullanim:
     python scihub_dl.py kaynaklar.txt                    # dosyadan DOI cikar ve indir
@@ -11,17 +12,21 @@ Kullanim:
     type kaynaklar.txt | python scihub_dl.py -             # stdin'den oku
     python scihub_dl.py kaynaklar.txt --no-scihub          # sadece yayinci
     python scihub_dl.py kaynaklar.txt --email a@b.edu      # Unpaywall fallback aktif
+    python scihub_dl.py kaynaklar.txt --stealth            # stealth browser (4. katman)
 
 Gereksinimler:
     pip install "scrapling[fetchers]"
 """
 
 import re
+import os
 import sys
 import time
 import json
 import hashlib
 import base64
+import shutil
+import tempfile
 import argparse
 from pathlib import Path
 
@@ -364,6 +369,107 @@ def download_from_unpaywall(doi: str, output_dir: Path, session, email: str,
         return False
 
 
+# --- Stealth browser fallback (Cloudflare/Akamai bypass) -------------------
+
+def _stealth_download_pdf(pdf_url: str, output_path: Path) -> bool:
+    """StealthyFetcher ile PDF indir. Browser download event'ini yakalar."""
+    dl_dir = tempfile.mkdtemp(prefix="stealth_dl_")
+    saved = [None]
+
+    def on_setup(page):
+        def handle(download):
+            path = os.path.join(dl_dir, download.suggested_filename or "paper.pdf")
+            try:
+                download.save_as(path)
+            except Exception:
+                pass
+            saved[0] = path
+        page.on("download", handle)
+
+    try:
+        from scrapling.fetchers import StealthyFetcher
+        r = StealthyFetcher.fetch(
+            pdf_url, headless=True, solve_cloudflare=True, page_setup=on_setup)
+        if r.body[:5].startswith(b"%PDF") and len(r.body) > 1000:
+            output_path.write_bytes(r.body)
+            return True
+    except Exception:
+        pass
+
+    # Download handler yakaladiysa kontrol et
+    for f in ([saved[0]] if saved[0] else []) + \
+             [os.path.join(dl_dir, x) for x in os.listdir(dl_dir)]:
+        if f and os.path.exists(f) and os.path.getsize(f) > 1000:
+            try:
+                with open(f, "rb") as fh:
+                    if fh.read(5) == b"%PDF-":
+                        shutil.copy2(f, output_path)
+                        return True
+            except Exception:
+                pass
+
+    shutil.rmtree(dl_dir, ignore_errors=True)
+    return False
+
+
+def download_with_stealth(doi: str, output_dir: Path, session,
+                           idx: int, total: int) -> bool:
+    """4. fallback: StealthyFetcher ile bot korumali siteleri as."""
+    filename = safe_filename(doi)
+    filepath = output_dir / filename
+    print(f"           >> Stealth browser deneniyor...")
+
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except ImportError:
+        print(f"           !  StealthyFetcher yuklenemedi")
+        return False
+
+    # 1) DOI'yi cozumle, makale sayfasini stealth browser ile ac
+    try:
+        resp = StealthyFetcher.fetch(
+            f"https://doi.org/{doi}", headless=True, solve_cloudflare=True)
+    except Exception as e:
+        print(f"           !  Makale sayfasi acilamadi: {e}")
+        return False
+
+    text = resp.body.decode("utf-8", errors="replace")
+
+    # 2) citation_pdf_url bul
+    pdf_url = None
+    for pat in (
+        r'<meta[^>]*name=["\']citation_pdf_url["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']citation_pdf_url["\']',
+    ):
+        m = re.search(pat, text, re.I)
+        if m:
+            pdf_url = m.group(1)
+            break
+
+    if not pdf_url:
+        # MDPI, Frontiers vb. icin URL pattern dene
+        final_url = str(getattr(resp, 'url', ''))
+        if "mdpi.com" in final_url:
+            pdf_url = final_url.rstrip("/") + "/pdf"
+        elif "frontiersin.org" in final_url and "/full" in final_url:
+            pdf_url = final_url.replace("/full", "/pdf")
+
+    if not pdf_url:
+        print(f"           X  Stealth ile de PDF linki bulunamadi")
+        return False
+
+    print(f"           PDF: {pdf_url[:90]}...")
+
+    # 3) PDF'i browser uzerinden indir (download handler ile)
+    if _stealth_download_pdf(pdf_url, filepath):
+        kb = filepath.stat().st_size / 1024
+        print(f"           OK {filename}  ({kb:.0f} KB) [stealth]")
+        return True
+
+    print(f"           X  Stealth indirme basarisiz")
+    return False
+
+
 # --- Indirme motoru ---------------------------------------------------------
 
 def download_one(doi: str, output_dir: Path, session, idx: int, total: int,
@@ -498,6 +604,8 @@ Ornekler:
                         help="Sci-Hub'u atla, sadece yayinci sitesinden indir")
     parser.add_argument("--email", "-e", default=None,
                         help="Unpaywall API icin e-posta (verilirse 3. fallback aktif)")
+    parser.add_argument("--stealth", action="store_true",
+                        help="Bot korumali siteler icin stealth browser fallback (4. katman)")
 
     args = parser.parse_args()
 
@@ -557,6 +665,10 @@ Ornekler:
         print(f"  Unpaywall: AKTIF ({args.email})")
     else:
         print(f"  Unpaywall: kapali (--email ile aktiflesir)")
+    if args.stealth:
+        print(f"  Stealth  : AKTIF (Cloudflare/Akamai bypass)")
+    else:
+        print(f"  Stealth  : kapali (--stealth ile aktiflesir)")
     print(f"  DOI    : {len(dois)} adet")
     print(f"  Klasor : {output_dir.resolve()}")
     print(f"  Bekleme: {args.delay}s")
@@ -584,6 +696,9 @@ Ornekler:
             if not success and args.email:
                 success = download_from_unpaywall(
                     doi, output_dir, session, args.email, i, len(dois))
+            if not success and args.stealth:
+                success = download_with_stealth(
+                    doi, output_dir, session, i, len(dois))
             if success:
                 ok += 1
             else:
