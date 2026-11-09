@@ -1,126 +1,119 @@
-# sci-bulk-downloader
+# acadl
 
-Bulk academic PDF downloader. Extracts DOIs from reference lists, downloads papers from Sci-Hub with automatic ALTCHA captcha solving, falls back to publisher open-access PDFs, and optionally queries the Unpaywall API for additional open-access sources.
+Academic PDF downloader with a 4-layer fallback pipeline.  
+Paste your DOIs, click download — it finds the PDFs for you.
 
-## Features
+**[Download the latest release](https://github.com/mcalisir/acadl/releases/latest)** — no installation needed, just extract and run.
 
-- **DOI extraction** — paste a bibliography / reference list, DOIs are detected automatically
-- **Sci-Hub download** — downloads from Sci-Hub with mirror support
-- **ALTCHA captcha solver** — automatically solves Sci-Hub's proof-of-work captcha
-- **Publisher fallback** — when Sci-Hub fails, resolves the DOI and finds the PDF on the publisher's site:
-  - `citation_pdf_url` meta tag (works for most open-access publishers)
-  - Frontiers URL pattern (`/full` → `/pdf`)
-  - DergiPark download links
-  - OJS-based journal repositories
-- **Unpaywall API fallback** — when publisher scraping also fails, queries Unpaywall for open-access PDF URLs (covers MDPI `?version=` links, SAGE, Pegegog, and more)
-- **Anti-bot stealth** — uses [Scrapling](https://github.com/AhmedKhalil777/scrapling) with Chrome TLS fingerprint impersonation
-- **Clipboard support** — if no file is given, reads DOIs from clipboard (Windows)
-- **Duplicate skip** — already downloaded PDFs are skipped
+---
 
-## Installation
+## How it works
+
+acadl tries four sources in order until it gets the PDF:
+
+| Layer | Source | What it does |
+|-------|--------|-------------|
+| 1 | **Sci-Hub** | Finds the paper on Sci-Hub mirrors, auto-solves ALTCHA captchas |
+| 2 | **Publisher** | Follows the DOI to the publisher's site and scrapes the open-access PDF |
+| 3 | **Unpaywall** | Queries the Unpaywall API for legally free PDF links |
+| 4 | **Stealth browser** | Launches a headless Chromium to bypass Cloudflare/Akamai bot protection |
+
+If all four fail, the paper is likely paywalled without any open-access copy available.
+
+---
+
+## Quick start
+
+### Windows exe (recommended)
+
+1. Download **acadl.zip** from [Releases](https://github.com/mcalisir/acadl/releases/latest)
+2. Extract the zip
+3. Double-click **acadl.exe** — the GUI opens
+4. Paste your DOIs, pick an output folder, click **Start Download**
+
+> Windows may show a SmartScreen warning (the exe is not code-signed).  
+> Click **More info** → **Run anyway**.
+
+### From source
 
 ```bash
 pip install "scrapling[fetchers]"
+python acadl.py refs.txt --stealth --email you@university.edu
 ```
 
 Requires Python 3.10+.
 
-## Usage
+---
 
-### From a reference file
+## GUI
 
-```bash
-python scihub_dl.py references.txt
-```
+The GUI launches when you double-click the exe (or run without arguments).
 
-The file can be a plain reference list (APA, MLA, etc.) — DOIs are extracted automatically.
+- Paste DOIs directly or load a `.txt` file
+- Choose output folder
+- Toggle Sci-Hub, stealth browser, Unpaywall
+- Set parallel workers (1–8, default 4)
+- Watch progress in the log area
 
-### With Unpaywall fallback
+---
 
-```bash
-python scihub_dl.py references.txt --email you@university.edu
-```
-
-Providing `--email` activates the Unpaywall API as a third fallback layer. Use a real email — Unpaywall rejects fake addresses.
-
-### Single DOI
+## CLI usage
 
 ```bash
-python scihub_dl.py --doi 10.1016/j.tate.2019.05.003
+# Basic — download DOIs from a file
+acadl.exe refs.txt
+
+# Single DOI
+acadl.exe --doi 10.1016/j.tate.2019.05.003
+
+# All 4 layers enabled with 8 parallel workers
+acadl.exe refs.txt --stealth --email you@university.edu -p 8
+
+# Custom output folder
+acadl.exe refs.txt -o ./papers
+
+# List extracted DOIs without downloading
+acadl.exe refs.txt --list
+
+# Skip Sci-Hub (publisher + Unpaywall + stealth only)
+acadl.exe refs.txt --no-scihub --email you@university.edu --stealth
+
+# Read from stdin
+type refs.txt | acadl.exe -
 ```
 
-### Custom output directory
+### Options
 
-```bash
-python scihub_dl.py references.txt -o ./papers
-```
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--doi`, `-d` | Single DOI to download | — |
+| `--output`, `-o` | Output folder | `./downloads` |
+| `--email`, `-e` | Email for Unpaywall API (enables layer 3) | — |
+| `--stealth` | Enable stealth browser (layer 4) | off |
+| `--parallel`, `-p` | Parallel workers | 4 |
+| `--delay` | Delay between requests (seconds) | 1 |
+| `--mirror`, `-m` | Sci-Hub mirror URL | `https://sci-hub.ist` |
+| `--no-scihub` | Skip Sci-Hub entirely | off |
+| `--list` | List DOIs only, don't download | off |
 
-### From stdin
+---
 
-```bash
-cat references.txt | python scihub_dl.py -
-```
+## Supported publishers
 
-### List DOIs only (no download)
+Works well with most open-access and hybrid publishers:
 
-```bash
-python scihub_dl.py references.txt --list
-```
+- **Frontiers**, **MDPI**, **SpringerOpen**, **Wiley OA** — direct PDF links
+- **DergiPark** — Turkish journal repository
+- **OJS journals** — Open Journal Systems repositories
+- **PeGeGoG**, **IJATE** and other academic platforms
+- **Any publisher** with a `citation_pdf_url` meta tag
 
-### Publisher-only mode (skip Sci-Hub)
+Limited or no access:
+- **Elsevier/ScienceDirect** — heavy Cloudflare protection, stealth browser helps sometimes
+- **SAGE** — Cloudflare + Akamai, stealth browser may bypass
+- Fully paywalled papers without any OA copy cannot be downloaded
 
-```bash
-python scihub_dl.py references.txt --no-scihub --email you@university.edu
-```
-
-### All options
-
-```
-usage: scihub_dl.py [-h] [--doi DOI] [--output OUTPUT] [--delay DELAY]
-                    [--mirror MIRROR] [--list] [--no-scihub] [--email EMAIL]
-                    [input]
-
-positional arguments:
-  input                 File containing DOIs (- = stdin)
-
-options:
-  -h, --help            show this help message and exit
-  --doi DOI, -d DOI     Single DOI
-  --output OUTPUT, -o OUTPUT
-                        Download directory (default: ./downloads)
-  --delay DELAY         Delay between requests in seconds (default: 5)
-  --mirror MIRROR, -m MIRROR
-                        Sci-Hub mirror URL (default: https://sci-hub.ist)
-  --list                List DOIs only, don't download
-  --no-scihub           Skip Sci-Hub, download from publisher only
-  --email EMAIL, -e EMAIL
-                        Email for Unpaywall API (enables third fallback)
-```
-
-## How it works
-
-```
-DOI → Sci-Hub → Publisher scraping → Unpaywall API → fail
-```
-
-1. **DOI extraction** — regex `10.\d{4,9}/...` picks up DOIs from any text
-2. **Sci-Hub attempt** — fetches the Sci-Hub page, finds the embedded PDF iframe, downloads the PDF
-3. **ALTCHA captcha** — if Sci-Hub shows a proof-of-work captcha, brute-forces the SHA-256 challenge and submits the solution
-4. **Publisher fallback** — if Sci-Hub doesn't have the paper:
-   - Resolves `https://doi.org/<doi>` to the publisher page
-   - Looks for `citation_pdf_url` meta tag
-   - Tries publisher-specific URL patterns (Frontiers, MDPI, DergiPark)
-   - Scans page for download links
-5. **Unpaywall fallback** (requires `--email`) — queries the Unpaywall API for open-access PDF URLs. Covers publishers where direct scraping fails.
-6. **Validation** — checks `%PDF` magic bytes and minimum file size before saving
-
-## Limitations
-
-- **Elsevier/ScienceDirect** — blocks all automated access (403 Cloudflare), not open access
-- **SAGE** — blocks automated access (403 Cloudflare), even Unpaywall URLs
-- **MDPI** — Akamai bot protection blocks automated PDF downloads, even with meta-refresh redirect
-- Some publishers require JavaScript rendering — this tool uses HTTP only, no browser automation
-- Unpaywall covers open-access papers only; paywalled papers without Sci-Hub copies can't be downloaded
+---
 
 ## Disclaimer
 
