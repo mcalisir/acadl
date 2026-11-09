@@ -1,20 +1,20 @@
 """
-scihub_dl.py - Akademik PDF Toplu Indirici (Scrapling)
+scihub_dl.py - Bulk Academic PDF Downloader (Scrapling)
 
-Sci-Hub'dan indirir; bulamazsa yayincinin sitesinden acik erisimli PDF'i alir.
-O da basarisizsa Unpaywall API ile acik erisim URL'si arar. En son
-stealth browser ile bot korumali siteleri (MDPI/SAGE/Elsevier) dener.
+Downloads from Sci-Hub; falls back to publisher open-access scraping.
+If that fails, tries Unpaywall API for OA URLs. Last resort:
+stealth browser for bot-protected sites (MDPI/SAGE/Elsevier).
 
-Kullanim:
-    python scihub_dl.py kaynaklar.txt                    # dosyadan DOI cikar ve indir
-    python scihub_dl.py --doi 10.1016/j.tate.2019.05.003  # tek DOI
-    python scihub_dl.py kaynaklar.txt -o ./makaleler       # klasor belirt
-    type kaynaklar.txt | python scihub_dl.py -             # stdin'den oku
-    python scihub_dl.py kaynaklar.txt --no-scihub          # sadece yayinci
-    python scihub_dl.py kaynaklar.txt --email a@b.edu      # Unpaywall fallback aktif
-    python scihub_dl.py kaynaklar.txt --stealth            # stealth browser (4. katman)
+Usage:
+    python scihub_dl.py refs.txt                           # extract DOIs from file and download
+    python scihub_dl.py --doi 10.1016/j.tate.2019.05.003  # single DOI
+    python scihub_dl.py refs.txt -o ./papers               # specify output folder
+    type refs.txt | python scihub_dl.py -                  # read from stdin
+    python scihub_dl.py refs.txt --no-scihub               # publisher only
+    python scihub_dl.py refs.txt --email a@b.edu           # enable Unpaywall fallback
+    python scihub_dl.py refs.txt --stealth                 # stealth browser (4th layer)
 
-Gereksinimler:
+Requirements:
     pip install "scrapling[fetchers]"
 """
 
@@ -28,7 +28,9 @@ import base64
 import shutil
 import tempfile
 import argparse
+import threading
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from scrapling.fetchers import FetcherSession
@@ -39,7 +41,8 @@ except ImportError:
 # --- Ayarlar ----------------------------------------------------------------
 
 SCIHUB_BASE = "https://sci-hub.ist"
-DELAY_SEC = 5
+DELAY_SEC = 1
+PARALLEL_WORKERS = 4
 MAX_RETRIES = 2
 
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s,;)\]}>\"']+[^\s,;.)\]}>\"':]")
@@ -260,7 +263,7 @@ def download_from_publisher(doi: str, output_dir: Path, session, idx: int, total
     print(f"           >> Yayinci fallback deneniyor...")
     pdf_url = find_publisher_pdf(doi, session)
     if not pdf_url:
-        print(f"           X  Yayici sayfasinda da PDF bulunamadi")
+        print(f"           X  No PDF found on publisher page")
         return False
 
     print(f"           PDF: {pdf_url[:90]}...")
@@ -273,15 +276,15 @@ def download_from_publisher(doi: str, output_dir: Path, session, idx: int, total
             return False
 
         if not raw[:5].startswith(b"%PDF"):
-            print(f"           !  Gecerli PDF degil")
+            print(f"           !  Not a valid PDF")
             return False
 
         filepath.write_bytes(raw)
         kb = len(raw) / 1024
-        print(f"           OK {filename}  ({kb:.0f} KB) [yayinci]")
+        print(f"           OK {filename}  ({kb:.0f} KB) [publisher]")
         return True
     except Exception as e:
-        print(f"           !  Yayinci indirme hatasi: {e}")
+        print(f"           !  Publisher download error: {e}")
         return False
 
 
@@ -336,7 +339,7 @@ def download_from_unpaywall(doi: str, output_dir: Path, session, email: str,
     print(f"           >> Unpaywall API deneniyor...")
     pdf_url = find_unpaywall_pdf(doi, session, email)
     if not pdf_url:
-        print(f"           X  Unpaywall'da acik erisim PDF bulunamadi")
+        print(f"           X  No open-access PDF found on Unpaywall")
         return False
 
     print(f"           PDF: {pdf_url[:90]}...")
@@ -357,7 +360,7 @@ def download_from_unpaywall(doi: str, output_dir: Path, session, email: str,
             return False
 
         if not raw[:5].startswith(b"%PDF"):
-            print(f"           !  Gecerli PDF degil (bot koruması olabilir)")
+            print(f"           !  Not a valid PDF (possible bot protection)")
             return False
 
         filepath.write_bytes(raw)
@@ -365,7 +368,7 @@ def download_from_unpaywall(doi: str, output_dir: Path, session, email: str,
         print(f"           OK {filename}  ({kb:.0f} KB) [unpaywall]")
         return True
     except Exception as e:
-        print(f"           !  Unpaywall indirme hatasi: {e}")
+        print(f"           !  Unpaywall download error: {e}")
         return False
 
 
@@ -455,7 +458,7 @@ def download_with_stealth(doi: str, output_dir: Path, session,
             pdf_url = final_url.replace("/full", "/pdf")
 
     if not pdf_url:
-        print(f"           X  Stealth ile de PDF linki bulunamadi")
+        print(f"           X  No PDF link found via stealth browser")
         return False
 
     print(f"           PDF: {pdf_url[:90]}...")
@@ -466,7 +469,7 @@ def download_with_stealth(doi: str, output_dir: Path, session,
         print(f"           OK {filename}  ({kb:.0f} KB) [stealth]")
         return True
 
-    print(f"           X  Stealth indirme basarisiz")
+    print(f"           X  Stealth download failed")
     return False
 
 
@@ -533,7 +536,7 @@ def download_one(doi: str, output_dir: Path, session, idx: int, total: int,
                     print(f"           !  PDF linki yok, tekrar ({attempt}/{MAX_RETRIES})...")
                     time.sleep(3)
                     continue
-                print("           X  PDF linki bulunamadi")
+                print("           X  No PDF link found")
                 return False
 
             resp_url = str(getattr(resp, 'url', url))
@@ -552,11 +555,11 @@ def download_one(doi: str, output_dir: Path, session, idx: int, total: int,
                     continue
 
             if not raw[:5].startswith(b"%PDF"):
-                print(f"           !  Gecerli PDF degil (ilk byte: {raw[:15]})")
+                print(f"           !  Not a valid PDF (first bytes: {raw[:15]})")
                 if attempt < MAX_RETRIES:
                     time.sleep(3)
                     continue
-                print("           X  Gecerli PDF indirilemedi")
+                print("           X  Could not download a valid PDF")
                 return False
 
             filepath.write_bytes(raw)
@@ -585,27 +588,29 @@ def main() -> None:
 Ornekler:
   python scihub_dl.py kaynaklar.txt
   python scihub_dl.py --doi 10.1016/j.tate.2019.05.003
-  python scihub_dl.py kaynaklar.txt -o ./makaleler
-  type kaynaklar.txt | python scihub_dl.py -
-  python scihub_dl.py --list kaynaklar.txt
+  python scihub_dl.py refs.txt -o ./papers
+  type refs.txt | python scihub_dl.py -
+  python scihub_dl.py --list refs.txt
 """,
     )
-    parser.add_argument("input", nargs="?", help="DOI iceren dosya (- = stdin)")
-    parser.add_argument("--doi", "-d", help="Tek DOI")
+    parser.add_argument("input", nargs="?", help="File containing DOIs (- = stdin)")
+    parser.add_argument("--doi", "-d", help="Single DOI")
     parser.add_argument("--output", "-o", default="./downloads",
-                        help="Indirme klasoru (varsayilan: ./downloads)")
+                        help="Output folder (default: ./downloads)")
     parser.add_argument("--delay", type=int, default=DELAY_SEC,
-                        help=f"Istekler arasi bekleme saniye (varsayilan: {DELAY_SEC})")
+                        help=f"Delay between requests in seconds (default: {DELAY_SEC})")
     parser.add_argument("--mirror", "-m", default=SCIHUB_BASE,
-                        help=f"Sci-Hub mirror (varsayilan: {SCIHUB_BASE})")
+                        help=f"Sci-Hub mirror (default: {SCIHUB_BASE})")
     parser.add_argument("--list", action="store_true",
-                        help="Sadece DOI'leri listele, indirme")
+                        help="Only list extracted DOIs, no download")
     parser.add_argument("--no-scihub", action="store_true",
-                        help="Sci-Hub'u atla, sadece yayinci sitesinden indir")
+                        help="Skip Sci-Hub, download from publisher only")
     parser.add_argument("--email", "-e", default=None,
-                        help="Unpaywall API icin e-posta (verilirse 3. fallback aktif)")
+                        help="Email for Unpaywall API (enables 3rd fallback layer)")
     parser.add_argument("--stealth", action="store_true",
-                        help="Bot korumali siteler icin stealth browser fallback (4. katman)")
+                        help="Stealth browser fallback for bot-protected sites (4th layer)")
+    parser.add_argument("--parallel", "-p", type=int, default=PARALLEL_WORKERS,
+                        help=f"Parallel download workers (default: {PARALLEL_WORKERS})")
 
     args = parser.parse_args()
 
@@ -619,7 +624,7 @@ Ornekler:
     elif args.input:
         p = Path(args.input)
         if not p.exists():
-            sys.exit(f"Dosya bulunamadi: {args.input}")
+            sys.exit(f"File not found: {args.input}")
         dois = extract_dois(p.read_text(encoding="utf-8"))
     else:
         try:
@@ -631,7 +636,7 @@ Ornekler:
             if cp.returncode == 0 and cp.stdout.strip():
                 dois = extract_dois(cp.stdout)
                 if dois:
-                    print(f"Panodan {len(dois)} DOI algilandi.\n")
+                    print(f"Detected {len(dois)} DOIs from clipboard.\n")
         except Exception:
             pass
         if not dois:
@@ -639,13 +644,13 @@ Ornekler:
             sys.exit(1)
 
     if not dois:
-        sys.exit("Hic DOI bulunamadi.")
+        sys.exit("No DOIs found.")
 
     # --- Sadece listele ---
     if args.list:
         for i, d in enumerate(dois, 1):
             print(f"  {i:2d}. {d}")
-        print(f"\nToplam: {len(dois)} DOI")
+        print(f"\nTotal: {len(dois)} DOIs")
         return
 
     # --- Hazirlik ---
@@ -655,23 +660,24 @@ Ornekler:
 
     sep = "=" * 60
     print(sep)
-    print(f"  Akademik PDF Toplu Indirici (Scrapling)")
+    print(f"  Bulk Academic PDF Downloader (Scrapling)")
     if args.no_scihub:
-        print(f"  Mod    : Sadece yayinci (Sci-Hub atlanacak)")
+        print(f"  Mode    : Publisher only (Sci-Hub skipped)")
     else:
-        print(f"  Mirror : {base}")
-        print(f"  Fallback: Yayinci sitesi (acik erisim)")
+        print(f"  Mirror  : {base}")
+        print(f"  Fallback: Publisher site (open access)")
     if args.email:
-        print(f"  Unpaywall: AKTIF ({args.email})")
+        print(f"  Unpaywall: ON ({args.email})")
     else:
-        print(f"  Unpaywall: kapali (--email ile aktiflesir)")
+        print(f"  Unpaywall: off (enable with --email)")
     if args.stealth:
-        print(f"  Stealth  : AKTIF (Cloudflare/Akamai bypass)")
+        print(f"  Stealth  : ON (Cloudflare/Akamai bypass)")
     else:
-        print(f"  Stealth  : kapali (--stealth ile aktiflesir)")
-    print(f"  DOI    : {len(dois)} adet")
-    print(f"  Klasor : {output_dir.resolve()}")
-    print(f"  Bekleme: {args.delay}s")
+        print(f"  Stealth  : off (enable with --stealth)")
+    print(f"  Parallel: {args.parallel} workers")
+    print(f"  DOIs   : {len(dois)}")
+    print(f"  Folder : {output_dir.resolve()}")
+    print(f"  Delay  : {args.delay}s")
     print(sep + "\n")
 
     for i, d in enumerate(dois, 1):
@@ -681,9 +687,11 @@ Ornekler:
     # --- Indirme ---
     ok = 0
     fail: list[str] = []
+    print_lock = threading.Lock()
 
-    with FetcherSession(impersonate="chrome", stealthy_headers=True, timeout=30) as session:
-        for i, doi in enumerate(dois, 1):
+    def _download_doi(idx_doi):
+        i, doi = idx_doi
+        with FetcherSession(impersonate="chrome", stealthy_headers=True, timeout=30) as session:
             success = False
             if args.no_scihub:
                 success = download_one(doi, output_dir, session, i, len(dois),
@@ -699,28 +707,282 @@ Ornekler:
             if not success and args.stealth:
                 success = download_with_stealth(
                     doi, output_dir, session, i, len(dois))
+        return doi, success
+
+    workers = min(args.parallel, len(dois))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {}
+        for idx_doi in enumerate(dois, 1):
+            f = pool.submit(_download_doi, idx_doi)
+            futures[f] = idx_doi[1]
+            time.sleep(args.delay)
+
+        for f in as_completed(futures):
+            doi, success = f.result()
             if success:
                 ok += 1
             else:
                 fail.append(doi)
 
-            if i < len(dois):
-                print(f"           ... {args.delay}s bekleniyor\n")
-                time.sleep(args.delay)
-
-    # --- Ozet ---
+    # --- Summary ---
     print(f"\n{sep}")
-    print(f"  OZET")
-    print(f"  Basarili : {ok}/{len(dois)}")
+    print(f"  SUMMARY")
+    print(f"  Success: {ok}/{len(dois)}")
     if fail:
-        print(f"  Basarisiz: {len(fail)}")
+        print(f"  Failed : {len(fail)}")
         for d in fail:
             print(f"     - {d}")
         if not args.email:
-            print(f"\n  IPUCU: --email ile Unpaywall fallback aktiflesir")
-    print(f"  Klasor   : {output_dir.resolve()}")
+            print(f"\n  TIP: Enable Unpaywall fallback with --email")
+    print(f"  Folder : {output_dir.resolve()}")
     print(sep)
 
 
+def launch_gui() -> None:
+    """Tkinter GUI — exe cift tiklaninca acilar."""
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+    import tkinter as tk
+    from tkinter import ttk, filedialog, scrolledtext
+    import threading
+
+    root = tk.Tk()
+    root.title("Academic PDF Downloader")
+    root.geometry("780x700")
+    root.resizable(True, True)
+
+    style = ttk.Style()
+    style.configure("TButton", padding=5, font=("Segoe UI", 10))
+    style.configure("TLabel", padding=2, font=("Segoe UI", 10))
+    style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"))
+    style.configure("TCheckbutton", font=("Segoe UI", 10))
+
+    main_frame = ttk.Frame(root, padding=12)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    # --- DOI Girisi (cok satirli) ---
+    doi_header = ttk.Frame(main_frame)
+    doi_header.pack(fill=tk.X)
+    ttk.Label(doi_header, text="Paste / Enter DOIs", style="Header.TLabel").pack(side=tk.LEFT)
+
+    def browse_file():
+        path = filedialog.askopenfilename(
+            title="Select DOI list file",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if path:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+            doi_text.delete("1.0", tk.END)
+            doi_text.insert("1.0", content)
+
+    ttk.Button(doi_header, text="Load from File", command=browse_file).pack(side=tk.RIGHT)
+
+    doi_text = tk.Text(main_frame, height=6, font=("Consolas", 10), wrap=tk.WORD)
+    doi_text.pack(fill=tk.X, pady=(4, 8))
+    doi_text.insert("1.0", "Paste DOIs here (one per line or mixed text)...")
+    doi_text.bind("<FocusIn>", lambda e: _clear_placeholder(e, doi_text))
+
+    def _clear_placeholder(event, widget):
+        if widget.get("1.0", "end-1c").startswith("Paste DOIs here"):
+            widget.delete("1.0", tk.END)
+
+    # --- Cikti Klasoru ---
+    out_frame = ttk.Frame(main_frame)
+    out_frame.pack(fill=tk.X, pady=4)
+    ttk.Label(out_frame, text="Output Folder:").pack(side=tk.LEFT)
+    out_entry = ttk.Entry(out_frame, font=("Segoe UI", 10))
+    out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+    out_entry.insert(0, str(Path.home() / "Downloads" / "pdfs"))
+
+    def browse_out():
+        path = filedialog.askdirectory(title="Select output folder")
+        if path:
+            out_entry.delete(0, tk.END)
+            out_entry.insert(0, path)
+
+    ttk.Button(out_frame, text="...", width=3, command=browse_out).pack(side=tk.RIGHT)
+
+    # --- Secenekler ---
+    ttk.Label(main_frame, text="Options", style="Header.TLabel").pack(anchor=tk.W, pady=(8, 0))
+
+    opts_frame = ttk.Frame(main_frame)
+    opts_frame.pack(fill=tk.X, pady=4)
+
+    stealth_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(opts_frame, text="Stealth Browser (4th layer)",
+                     variable=stealth_var).pack(side=tk.LEFT, padx=(0, 20))
+
+    no_scihub_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(opts_frame, text="Skip Sci-Hub",
+                     variable=no_scihub_var).pack(side=tk.LEFT, padx=(0, 20))
+
+    row2 = ttk.Frame(main_frame)
+    row2.pack(fill=tk.X, pady=4)
+    ttk.Label(row2, text="Unpaywall Email:").pack(side=tk.LEFT)
+    email_entry = ttk.Entry(row2, width=28, font=("Segoe UI", 10))
+    email_entry.pack(side=tk.LEFT, padx=6)
+    ttk.Label(row2, text="Mirror:").pack(side=tk.LEFT, padx=(12, 0))
+    mirror_entry = ttk.Entry(row2, width=22, font=("Segoe UI", 10))
+    mirror_entry.pack(side=tk.LEFT, padx=6)
+    mirror_entry.insert(0, SCIHUB_BASE)
+
+    row3 = ttk.Frame(main_frame)
+    row3.pack(fill=tk.X, pady=4)
+    ttk.Label(row3, text="Parallel Workers:").pack(side=tk.LEFT)
+    parallel_spin = tk.Spinbox(row3, from_=1, to=8, width=4, font=("Segoe UI", 10))
+    parallel_spin.pack(side=tk.LEFT, padx=6)
+    parallel_spin.delete(0, tk.END)
+    parallel_spin.insert(0, str(PARALLEL_WORKERS))
+
+    # --- Butonlar ---
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill=tk.X, pady=(8, 4))
+
+    running = threading.Event()
+
+    def log(msg: str):
+        log_text.configure(state=tk.NORMAL)
+        log_text.insert(tk.END, msg + "\n")
+        log_text.see(tk.END)
+        log_text.configure(state=tk.DISABLED)
+
+    def run_download():
+        if running.is_set():
+            return
+        running.set()
+        start_btn.configure(state=tk.DISABLED)
+        log_text.configure(state=tk.NORMAL)
+        log_text.delete("1.0", tk.END)
+        log_text.configure(state=tk.DISABLED)
+
+        raw = doi_text.get("1.0", "end-1c").strip()
+        out_dir = Path(out_entry.get().strip())
+        email_val = email_entry.get().strip() or None
+        mirror_val = mirror_entry.get().strip() or SCIHUB_BASE
+        use_stealth = stealth_var.get()
+        skip_scihub = no_scihub_var.get()
+
+        dois = extract_dois(raw)
+        if not dois:
+            log("ERROR: No DOIs found. Paste DOIs or load a file.")
+            running.clear()
+            start_btn.configure(state=tk.NORMAL)
+            return
+
+        n_workers = int(parallel_spin.get() or PARALLEL_WORKERS)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log(f"{'='*50}")
+        log(f"  {len(dois)} DOIs to download -> {out_dir.resolve()}")
+        log(f"  Parallel: {n_workers} workers")
+        if use_stealth:
+            log(f"  Stealth: ON")
+        if skip_scihub:
+            log(f"  Sci-Hub: SKIPPED")
+        if email_val:
+            log(f"  Unpaywall: {email_val}")
+        log(f"{'='*50}\n")
+
+        def worker():
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+
+            class GUIWriter:
+                def write(self, s):
+                    if s and s.strip():
+                        root.after(0, log, s.rstrip("\n"))
+                def flush(self):
+                    pass
+
+            writer = GUIWriter()
+            sys.stdout = writer
+            sys.stderr = writer
+
+            try:
+                ok = 0
+                fail_list: list[str] = []
+
+                def _dl(idx_doi):
+                    i, doi = idx_doi
+                    with FetcherSession(impersonate="chrome", stealthy_headers=True, timeout=30) as session:
+                        success = False
+                        if skip_scihub:
+                            success = download_one(doi, out_dir, session, i, len(dois),
+                                                   mirror_val, use_scihub=False)
+                        else:
+                            success = download_one(doi, out_dir, session, i, len(dois), mirror_val)
+                            if not success:
+                                success = download_from_publisher(
+                                    doi, out_dir, session, i, len(dois))
+                        if not success and email_val:
+                            success = download_from_unpaywall(
+                                doi, out_dir, session, email_val, i, len(dois))
+                        if not success and use_stealth:
+                            success = download_with_stealth(
+                                doi, out_dir, session, i, len(dois))
+                    return doi, success
+
+                w = min(n_workers, len(dois))
+                with ThreadPoolExecutor(max_workers=w) as pool:
+                    futures = {}
+                    for idx_doi in enumerate(dois, 1):
+                        f = pool.submit(_dl, idx_doi)
+                        futures[f] = idx_doi[1]
+                        time.sleep(DELAY_SEC)
+                    for f in as_completed(futures):
+                        doi, success = f.result()
+                        if success:
+                            ok += 1
+                        else:
+                            fail_list.append(doi)
+
+                root.after(0, log, f"\n{'='*50}")
+                root.after(0, log, f"  SUMMARY: {ok}/{len(dois)} successful")
+                if fail_list:
+                    root.after(0, log, f"  Failed: {len(fail_list)}")
+                    for d in fail_list:
+                        root.after(0, log, f"    - {d}")
+                root.after(0, log, f"  Folder: {out_dir.resolve()}")
+                root.after(0, log, f"{'='*50}")
+            except Exception as e:
+                root.after(0, log, f"\nERROR: {e}")
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+                running.clear()
+                root.after(0, lambda: start_btn.configure(state=tk.NORMAL))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    start_btn = ttk.Button(btn_frame, text="Start Download", command=run_download)
+    start_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+    def open_folder():
+        d = out_entry.get().strip()
+        if os.path.isdir(d):
+            os.startfile(d)
+
+    ttk.Button(btn_frame, text="Open Folder", command=open_folder).pack(side=tk.LEFT)
+
+    # --- Log Alani ---
+    ttk.Label(main_frame, text="Output", style="Header.TLabel").pack(anchor=tk.W, pady=(8, 0))
+    log_text = scrolledtext.ScrolledText(main_frame, height=12, state=tk.DISABLED,
+                                          font=("Consolas", 10))
+    log_text.pack(fill=tk.BOTH, expand=True, pady=4)
+
+    root.mainloop()
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) <= 1:
+        try:
+            launch_gui()
+        except Exception as e:
+            log_path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else '.', 'crash.log')
+            with open(log_path, 'w', encoding='utf-8') as f:
+                import traceback
+                traceback.print_exc(file=f)
+    else:
+        main()
