@@ -32,7 +32,7 @@ if os.path.isdir(ffmpeg_dir):
     datas.append((ffmpeg_dir, os.path.join("ms-playwright", "ffmpeg-1013")))
 
 a = Analysis(
-    ['scihub_dl.py'],
+    ['acadl.py'],
     pathex=[],
     binaries=[],
     datas=datas,
@@ -69,7 +69,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='scihub_dl',
+    name='acadl',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -85,5 +85,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='scihub_dl',
+    name='acadl',
 )

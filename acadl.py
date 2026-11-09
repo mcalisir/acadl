@@ -1,18 +1,16 @@
 """
-scihub_dl.py - Bulk Academic PDF Downloader (Scrapling)
+acadl - Academic PDF Downloader
 
-Downloads from Sci-Hub; falls back to publisher open-access scraping.
-If that fails, tries Unpaywall API for OA URLs. Last resort:
-stealth browser for bot-protected sites (MDPI/SAGE/Elsevier).
+4-layer download pipeline: Sci-Hub → Publisher scraping → Unpaywall API → Stealth browser.
 
 Usage:
-    python scihub_dl.py refs.txt                           # extract DOIs from file and download
-    python scihub_dl.py --doi 10.1016/j.tate.2019.05.003  # single DOI
-    python scihub_dl.py refs.txt -o ./papers               # specify output folder
-    type refs.txt | python scihub_dl.py -                  # read from stdin
-    python scihub_dl.py refs.txt --no-scihub               # publisher only
-    python scihub_dl.py refs.txt --email a@b.edu           # enable Unpaywall fallback
-    python scihub_dl.py refs.txt --stealth                 # stealth browser (4th layer)
+    python acadl.py refs.txt                           # extract DOIs from file and download
+    python acadl.py --doi 10.1016/j.tate.2019.05.003  # single DOI
+    python acadl.py refs.txt -o ./papers               # specify output folder
+    type refs.txt | python acadl.py -                  # read from stdin
+    python acadl.py refs.txt --no-scihub               # publisher only
+    python acadl.py refs.txt --email a@b.edu           # enable Unpaywall fallback
+    python acadl.py refs.txt --stealth                 # stealth browser (4th layer)
 
 Requirements:
     pip install "scrapling[fetchers]"
@@ -582,15 +580,15 @@ def download_one(doi: str, output_dir: Path, session, idx: int, total: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Sci-Hub DOI Toplu PDF Indirici (Scrapling)",
+        description="acadl - Academic PDF Downloader",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
-Ornekler:
-  python scihub_dl.py kaynaklar.txt
-  python scihub_dl.py --doi 10.1016/j.tate.2019.05.003
-  python scihub_dl.py refs.txt -o ./papers
-  type refs.txt | python scihub_dl.py -
-  python scihub_dl.py --list refs.txt
+Examples:
+  python acadl.py refs.txt
+  python acadl.py --doi 10.1016/j.tate.2019.05.003
+  python acadl.py refs.txt -o ./papers
+  type refs.txt | python acadl.py -
+  python acadl.py --list refs.txt
 """,
     )
     parser.add_argument("input", nargs="?", help="File containing DOIs (- = stdin)")
@@ -660,7 +658,7 @@ Ornekler:
 
     sep = "=" * 60
     print(sep)
-    print(f"  Bulk Academic PDF Downloader (Scrapling)")
+    print(f"  acadl - Academic PDF Downloader")
     if args.no_scihub:
         print(f"  Mode    : Publisher only (Sci-Hub skipped)")
     else:
@@ -751,7 +749,7 @@ def launch_gui() -> None:
     import threading
 
     root = tk.Tk()
-    root.title("Academic PDF Downloader")
+    root.title("acadl - Academic PDF Downloader")
     root.geometry("780x700")
     root.resizable(True, True)
 
