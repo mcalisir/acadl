@@ -1,7 +1,8 @@
 # acadl
 
-Academic PDF downloader with a 4-layer fallback pipeline.  
-Paste your DOIs, click download — it finds the PDFs for you.
+**Copy a paper's reference list. Paste it. Get all the PDFs.**
+
+acadl extracts DOIs from any text — messy bibliographies, APA/MLA reference lists, Word documents, even raw HTML. You don't need to clean anything up. Just copy the entire references section from a paper you like, paste it in, and acadl downloads every cited paper it can find.
 
 **[Download the latest release](https://github.com/mcalisir/acadl/releases/latest)** — no installation needed, just extract and run.
 
@@ -9,7 +10,7 @@ Paste your DOIs, click download — it finds the PDFs for you.
 
 ## How it works
 
-acadl tries four sources in order until it gets the PDF:
+You paste any text. acadl finds every DOI in it and tries four sources in order until it gets the PDF:
 
 | Layer | Source | What it does |
 |-------|--------|-------------|
@@ -29,7 +30,9 @@ If all four fail, the paper is likely paywalled without any open-access copy ava
 1. Download **acadl.zip** from [Releases](https://github.com/mcalisir/acadl/releases/latest)
 2. Extract the zip
 3. Double-click **acadl.exe** — the GUI opens
-4. Paste your DOIs, pick an output folder, click **Start Download**
+4. Copy the entire **References** section from any paper and paste it in — no cleanup needed, acadl ignores everything that isn't a DOI
+5. Pick an output folder, click **Start Download**
+6. acadl downloads up to 4 papers simultaneously, trying all 4 sources for each one
 
 > Windows may show a SmartScreen warning (the exe is not code-signed).  
 > Click **More info** → **Run anyway**.
